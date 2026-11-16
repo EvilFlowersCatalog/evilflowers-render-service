@@ -1,0 +1,107 @@
+# Render service image: test, build, push to GHCR (private).
+# Contract: knowledge note Deploy-a-Service §1; jobs copied from evilflowers-ocr-service's image.yml.
+#
+#   push to the default branch → check, test image, build, smoke test, push :master :sha-<short>
+#   push to another branch     → check, test image, build, smoke test, push :sha-<short>
+#   pull request               → check, test image, build, smoke test (no push)
+#   manual                     → as a push of the chosen ref
+#
+# No deploy job yet: the Deployment (KEDA 0..N on `evilflowers_render.standalone`, Valkey db 8) is an Ansible role in
+# evilflowers-knowledge that does not exist yet. Add the `deploy` job of ocr-service's image.yml once it does.
+
+name: image
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/evilflowerscatalog/evilflowers-render-service
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: render-check-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # No system tools here on purpose: the tools tests skip, and the `test` stage of the image below runs them with
+      # every tool pinned. Ubuntu's apt pandoc is too old for the EPUB (no --math-method) and would fail them.
+      - name: Install
+        run: uv sync --locked --all-extras
+      - name: Lint
+        run: uv run ruff check
+      - name: Test
+        run: uv run pytest -q
+
+  image:
+    needs: check
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: render-image-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=master,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+      # The suite inside the image with every tool: a whole book through recode_pdf, jbig2, veraPDF, pandoc,
+      # OpenJPEG. The stage fails when a tools test is skipped.
+      - name: Test in the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: render-service:smoke
+          build-args: |
+            IMAGE_TAG=${{ github.ref_name }}@${{ github.sha }}
+          cache-from: type=gha
+      # The way k8s runs it: read-only root, no network, uid 65534, /tmp the only writable path.
+      - name: Smoke test (read-only, offline, non-root)
+        run: |
+          docker run --rm --read-only --network none --user 65534:65534 --tmpfs /tmp render-service:smoke \
+            sh -c 'python -c "import evilflowers_render.tasks" && recode_pdf --version && verapdf --version'
+      - id: build
+        name: Push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IMAGE_TAG=${{ github.ref_name }}@${{ github.sha }}
+          cache-from: type=gha

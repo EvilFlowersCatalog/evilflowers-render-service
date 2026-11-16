@@ -1,0 +1,72 @@
+[project]
+name = "evilflowers-render-service"
+version = "0.1.0"
+description = "Standalone Celery worker of the EvilFlowers books digitalizer: one book's access leaves + hOCR -> MRC PDF, PDF/A-2b, EPUB and the IA JP2 package (task evilflowers_render.book)"
+readme = "README.md"
+authors = [{ name = "Jakub Dubec", email = "jakub.dubec@stuba.sk" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # The shared worker runtime: Celery config, shutdown, delivery cap, outcome files, StandaloneJob, telemetry.
+    # Pinned to a commit in [tool.uv.sources].
+    "evilflowers-worker",
+    "celery[redis]>=5.6,<6",
+    # The media must be byte-identical to the digitalizer's in-process render (its test_render_service), so these
+    # three keep the digitalizer's ranges; bump them together with it.
+    # recode_pdf (Internet Archive's MRC assembler); the profiles were tuned on 1.5.7.
+    "archive-pdf-tools>=1.5,<2",
+    "pikepdf>=10,<11",
+    # The JP2 package and the PDF/A JPEG 2000 layers: Pillow's OpenJPEG plugin (the official wheels carry it).
+    "pillow>=11,<12",
+    # The EPUB (reflow): hOCR parsing and the page-image analysis (figures, formula crops). pandoc is a system tool.
+    "lxml>=5,<7",
+    "opencv-python-headless>=4.10,<5",
+    "numpy>=1.26",
+    "pydantic>=2.12,<3",
+    "pydantic-settings>=2.6,<3",
+]
+
+[project.optional-dependencies]
+# OTLP/HTTP to the node's Alloy: the kit's telemetry extra.
+otel = [
+    "evilflowers-worker[otel]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.14",
+]
+
+[tool.uv.sources]
+# evilflowers-worker#5 (StandaloneJob, run_task, outcome files). Bump `rev` and `uv lock` to update.
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "e530f68d2e3d98519008d39b30fee96f28009834" }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evilflowers_render"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning:importlib._bootstrap"]
+markers = ["tools: runs the real media tools (recode_pdf, jbig2, jpegoptim, pandoc, veraPDF); the image has them"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "LOG", "G"]
+
+[tool.ruff.lint.per-file-ignores]
+# The reflow edition is a verbatim port of the digitalizer's reflow/ (98bf9b0): kept byte-for-byte so a diff against
+# the source stays empty. Its look-alike characters (Greek/Cyrillic letters, dashes, minus, ×) are the data it matches.
+"src/evilflowers_render/reflow/*.py" = ["RUF001", "RUF002", "RUF003", "RUF007", "RUF059"]
+"tests/reflow/*.py" = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["evilflowers_render", "tests"]

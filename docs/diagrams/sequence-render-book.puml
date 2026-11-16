@@ -1,0 +1,46 @@
+@startuml sequence-render-book
+!include elvira.iuml
+' What: one render job: the orchestrator sends paths only, the worker reads the request from storage, writes media into output_dir and the outcome file last, and Celery's link / link_error tells the orchestrator.
+' Kind: UML sequence diagram. Scope: one delivery of evilflowers_render.book; the orchestrator's apply step is summarised.
+' Source: evilflowers-render-service#1 contract comment; evilflowers-worker@e530f68 README (standalone job); Key-Value note (db 8, planned) (2026-11-16)
+
+title evilflowers_render.book: one job (proposal, 2026-11-16)
+
+participant "digitalizer\norchestrator" as orch
+queue "Valkey db 8\nevilflowers_render.standalone" as q <<proposed>>
+participant "render worker\nevilflowers_render.book" as w <<proposed>> <<focus>>
+database "shared storage\nSTORAGE_PATH" as fs
+
+orch -> fs : write request-<run>.json (pages, hocr, regions, metadata, jp2)
+orch -> q : send_task(kwargs: run_id, job, token, inputs, output_dir, outcome, request)\n+ link / link_error
+q -> w : deliver (acks_late)
+w -> w : validate (StandaloneJob + request path), count delivery
+alt delivery past MAX_DELIVERIES
+  w -> fs : outcome {status: failed, error}
+  w -->> q : raise -> link_error
+else
+  w -> fs : read request + every path in it (checked under STORAGE_PATH)
+  w -[$accent_msg()]> fs : <b><id>.pdf · <id>_archival.pdf</b> (recode_pdf per profile, timeout = time left)
+  w -> w : veraPDF on <id>_archival.pdf
+  opt epub in request.formats
+    w -> fs : <id>.epub (deadline checked per page)
+  end
+  opt request.jp2 not empty
+    w -> fs : <id>_jp2.zip (deadline checked per leaf)
+  end
+  alt success
+    w -> fs : outcome {status: done, files{size, md5}, pdfa_valid} (last, atomic)
+    w -->> q : {status, files} -> link
+  else error or deadline
+    w -> fs : outcome {status: failed, error}
+    w -->> q : raise -> link_error
+  else SIGTERM / cold cancel
+    w -->> q : requeue, no outcome (same token)
+  end
+end
+q -->> orch : digitalizer.job_done / job_failed
+orch -> fs : read outcome, check token, sizes, formats, pdfa_valid; rename media; write IA XML + text
+
+caption Redis carries only paths. The outcome is the commit marker: written last, never on a deliberate stop.
+footer ELVIRA · FIIT STU · evilflowers-render-service · docs/diagrams/sequence-render-book.puml
+@enduml

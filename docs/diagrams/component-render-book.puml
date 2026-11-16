@@ -1,0 +1,43 @@
+@startuml component-render-book
+!include elvira.iuml
+' What: evilflowers_render.book turns one book's request file into media (MRC PDF, PDF/A-2b, EPUB, JP2 zip) in its attempt's output_dir, then writes the outcome file last; the IA XML and text stay with the orchestrator.
+' Kind: UML component diagram. Scope: the modules of this service and what each requires; not the orchestrator's internals.
+' Source: evilflowers-render-service#1 + its contract comment; evilflowers-worker@e530f68 README; evilflowers-books-digitalizer@98bf9b0 studio/adapters/render, studio/testing/standalone.py (2026-11-16)
+
+title evilflowers_render.book: modules (proposal, 2026-11-16)
+
+component "evilflowers-worker\n(kit @ e530f68)" as kit {
+  portout "create_app / run_task" as kit_rt
+  portout "StandaloneJob · write_outcome" as kit_out
+}
+
+package "evilflowers_render" <<proposed>> {
+  component "worker\ncreate_app('render')" as worker <<proposed>>
+  component "tasks\nevilflowers_render.book" as tasks <<proposed>>
+  component "book\nrequest -> media -> outcome" as book <<proposed>> <<focus>>
+  component "pdf\nRenderPdf · FinalizePdf · EnsurePdfA" as pdf <<proposed>>
+  component "jp2\nbuild_jp2_zip" as jp2 <<proposed>>
+  component "reflow\nbuild_edition (EPUB)" as reflow <<proposed>>
+  component "deadline\nsoft deadline per page" as deadline <<proposed>>
+}
+
+rectangle "recode_pdf · jbig2 · jpegoptim\nveraPDF · pandoc" as tools <<proposed>>
+
+worker ..> kit_rt : «use» create_app
+tasks ..> kit_rt : «use» run_task
+tasks --> book : run(BookJob) / give_up
+book -[$accent()]-> pdf : <b>pdf, pdfa</b>
+book --> reflow : epub
+book --> jp2 : images (request.jp2)
+book ..> kit_out : «use» outcome last
+pdf --> tools : recode_pdf, veraPDF (timeout = time left)
+reflow --> tools : pandoc (no timeout)
+pdf ..> deadline : check between profiles
+reflow ..> deadline : check per page
+jp2 ..> deadline : check per leaf
+
+$legend_live_proposed()
+
+caption The task validates the message (kit), the book module renders each requested format and writes the outcome last.\nThe soft deadline is checked between pages and leaves; recode_pdf and veraPDF get only the time that is left.
+footer ELVIRA · FIIT STU · evilflowers-render-service · docs/diagrams/component-render-book.puml
+@enduml
